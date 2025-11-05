@@ -1,43 +1,69 @@
-// server.js
+// === NOVA BACKEND : SELF-HEALING MODE ===
 import express from "express";
-import fetch from "node-fetch";
+import cors from "cors";
 import dotenv from "dotenv";
+import helmet from "helmet";
+import rateLimit from "express-rate-limit";
+import fetch from "node-fetch";
 
 dotenv.config();
-
 const app = express();
+
+// ─────────────────────────────────────────────
+// MIDDLEWARES
+// ─────────────────────────────────────────────
+app.use(cors());
 app.use(express.json());
+app.use(helmet());
 
-const PORT = process.env.PORT || 3000;
-const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY;
+// Rate-limiter (safe default)
+const limiter = rateLimit({
+  windowMs: 60 * 1000,
+  max: 30,
+  message: { error: "Too many requests, please wait a bit." },
+});
+app.use(limiter);
 
-// Root check
+// ─────────────────────────────────────────────
+// HEALTH & DEBUG ROUTES
+// ─────────────────────────────────────────────
 app.get("/", (req, res) => {
-  res.send("✅ Nova backend is running fine!");
+  res.send("✅ Nova backend is online. Use /api/chat for POST requests.");
 });
 
-// Quick debug route (you can delete later)
+app.get("/health", (req, res) => {
+  res.json({ status: "ok", timestamp: new Date().toISOString() });
+});
+
 app.get("/checkenv", (req, res) => {
+  const apiKeyLoaded = !!process.env.OPENAI_API_KEY;
   res.json({
-    apiKeyLoaded: !!OPENROUTER_API_KEY,
+    apiKeyLoaded,
+    port: process.env.PORT,
+    envMode: process.env.NODE_ENV || "development",
   });
 });
 
-// Main chat route
+// ─────────────────────────────────────────────
+// MAIN CHAT ENDPOINT
+// ─────────────────────────────────────────────
 app.post("/api/chat", async (req, res) => {
+  const { message } = req.body;
+
+  if (!message) {
+    return res.status(400).json({ error: "message is required" });
+  }
+
+  if (!process.env.OPENAI_API_KEY) {
+    return res.status(500).json({ error: "API key missing in environment" });
+  }
+
   try {
-    const { message } = req.body;
-    if (!message) return res.status(400).json({ error: "message is required" });
-
-    if (!OPENROUTER_API_KEY) {
-      return res.status(500).json({ error: "API key missing in environment" });
-    }
-
-    const response = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    const openaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${OPENROUTER_API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
       body: JSON.stringify({
         model: "gpt-4o-mini",
@@ -45,18 +71,37 @@ app.post("/api/chat", async (req, res) => {
       }),
     });
 
-    const data = await response.json();
+    const data = await openaiRes.json();
 
-    if (!response.ok) {
-      console.error("OpenRouter error:", data);
-      return res.status(response.status).json({ error: data.error?.message || "OpenRouter API error" });
+    if (!openaiRes.ok) {
+      console.error("🔴 OpenAI API Error:", data);
+      return res
+        .status(openaiRes.status)
+        .json({ error: data.error?.message || "OpenAI error" });
     }
 
-    res.json({ reply: data.choices?.[0]?.message?.content || "No reply from model" });
+    const reply = data.choices?.[0]?.message?.content || "No reply from model";
+    res.json({ reply });
   } catch (err) {
-    console.error("Server crash:", err);
-    res.status(500).json({ error: "Server error: " + err.message });
+    console.error("🔴 Server Error:", err);
+    res.status(500).json({ error: err.message || "Internal Server Error" });
   }
 });
 
-app.listen(PORT, () => console.log(`🚀 Server ready on port ${PORT}`));
+// ─────────────────────────────────────────────
+// GLOBAL FAIL-SAFE HANDLERS
+// ─────────────────────────────────────────────
+process.on("uncaughtException", (err) => {
+  console.error("⚠️ Uncaught Exception:", err);
+});
+process.on("unhandledRejection", (reason) => {
+  console.error("⚠️ Unhandled Rejection:", reason);
+});
+
+// ─────────────────────────────────────────────
+// START SERVER
+// ─────────────────────────────────────────────
+const PORT = process.env.PORT || 10000;
+app.listen(PORT, () => {
+  console.log(`🚀 Nova backend running on port ${PORT}`);
+});
